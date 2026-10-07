@@ -2,35 +2,52 @@
 
 ربات تلگرامی برای فروش سرویس ربات: کیف پول (شارژ با رسید و تایید ادمین)، خرید پلن، دریافت مرحله‌به‌مرحله‌ی اطلاعات نصب از مشتری، پنل مدیریت برای ادمین و یادآوری/انقضای خودکار.
 
-## نصب روی سرور (Ubuntu/Debian)
+## نصب سریع روی سرور (Ubuntu/Debian)
 
-سرور باید به تلگرام دسترسی داشته باشد (ترجیحاً سرور خارج از ایران) و پایتون ۳.۱۰ یا بالاتر داشته باشد.
+سرور باید به تلگرام دسترسی داشته باشد (ترجیحاً سرور خارج از ایران) و پایتون ۳.۱۰ یا بالاتر داشته باشد. دستور زیر را با کاربر root اجرا کنید (`sudo -i`):
 
 ```bash
-git clone https://github.com/<USER>/<REPO>.git
-cd <REPO>
-sudo bash install.sh
+REPO_URL=https://github.com/dandotteam-cardi/Cardi-sell-bot.git bash <(curl -fsSL https://raw.githubusercontent.com/dandotteam-cardi/Cardi-sell-bot/main/install.sh)
 ```
 
-اسکریپت توکن ربات و آیدی عددی ادمین‌ها را می‌پرسد، همه‌چیز را در `/opt/sell-bot` نصب می‌کند و ربات را به‌صورت سرویس `sell-bot` اجرا می‌کند (بعد از ریبوت هم بالا می‌آید).
+اسکریپت توکن ربات و آیدی عددی ادمین‌ها را می‌پرسد، سورس را در `/opt/seller-bot` نصب می‌کند و ربات را به‌صورت سرویس `seller-bot` اجرا می‌کند (بعد از ریبوت هم بالا می‌آید). همچنین دستور مدیریتی `sellerbot` ساخته می‌شود.
+
+## نصب دستی (با کلون ریپو)
+
+```bash
+git clone https://github.com/dandotteam-cardi/Cardi-sell-bot.git
+cd Cardi-sell-bot
+sudo REPO_URL=https://github.com/dandotteam-cardi/Cardi-sell-bot.git bash install.sh
+```
 
 ## به‌روزرسانی
 
 ```bash
-cd <REPO>
-git pull
-sudo bash install.sh
+sudo sellerbot update
 ```
 
 فایل `.env` و دیتابیس دست نمی‌خورند.
 
-## دستورهای مفید
+## دستورهای مدیریتی
 
 ```bash
-journalctl -u sell-bot -f          # لاگ زنده
-systemctl restart sell-bot         # راه‌اندازی مجدد
-systemctl stop sell-bot            # توقف
-nano /opt/sell-bot/.env            # تنظیمات (بعد از تغییر، ربات را ریستارت کنید)
+sudo sellerbot status       # وضعیت ربات
+sudo sellerbot logs         # لاگ زنده
+sudo sellerbot restart      # راه‌اندازی مجدد
+sudo sellerbot stop         # توقف
+sudo sellerbot start        # اجرا
+sudo sellerbot edit         # ویرایش .env (بعد از ذخیره ربات خودکار ریستارت می‌شود)
+sudo sellerbot update       # به‌روزرسانی به آخرین نسخه
+sudo sellerbot uninstall    # حذف
+```
+
+معادل با systemd:
+
+```bash
+journalctl -u seller-bot -f          # لاگ زنده
+systemctl restart seller-bot         # راه‌اندازی مجدد
+systemctl stop seller-bot            # توقف
+nano /opt/seller-bot/.env            # تنظیمات (بعد از تغییر، ربات را ریستارت کنید)
 ```
 
 ## استفاده
