@@ -27,6 +27,7 @@ from telegram.ext import (
 import admin
 import config
 import install_flow as flow
+import provisioner
 from db import Database
 from utils import (
     days_left, effective_status, esc, fmt_date, fmt_datetime, money, norm_digits, status_label,
@@ -656,7 +657,14 @@ async def expiry_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             await send(context, s["user_id"], f"⛔️ سرویس <b>{esc(_service_title(s))}</b> منقضی شد.")
         except TelegramError:
             pass
-        await notify_admins(context, f"⛔️ سرویس #{s['id']} (@{esc(s['bot_username'] or '-')}) منقضی شد.")
+        note = f"⛔️ سرویس #{s['id']} (@{esc(s['bot_username'] or '-')}) منقضی شد."
+        if provisioner.enabled():
+            ok, out = await provisioner.stop(s["id"])
+            if ok:
+                note += "\n⏹ ربات مشتری روی سرور متوقف شد."
+            elif "not-installed" not in out:
+                note += "\n⚠️ توقف ربات روی سرور ناموفق بود؛ دستی بررسی کنید."
+        await notify_admins(context, note)
     for s in await db.due_soon(config.EXPIRY_REMINDER_DAYS):
         try:
             await send(context, s["user_id"],

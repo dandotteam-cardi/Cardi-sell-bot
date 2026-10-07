@@ -24,6 +24,8 @@ TOPUP_PRESETS: tuple[int, ...] = (50_000, 100_000, 200_000, 500_000, 1_000_000)
 MIN_TOPUP: int = int(os.getenv("MIN_TOPUP", "10000"))
 MAX_TOPUP: int = int(os.getenv("MAX_TOPUP", "100000000"))
 EXPIRY_REMINDER_DAYS: int = int(os.getenv("EXPIRY_REMINDER_DAYS", "3"))
+# نصب خودکار ربات مشتری‌ها روی همین سرور (نیاز به sellbot-provision و sudoers؛ install.sh آن‌ها را می‌سازد)
+PROVISION_ENABLED: bool = os.getenv("PROVISION_ENABLED", "0").strip().lower() in ("1", "true", "yes")
 
 
 def is_admin(user_id: int | None) -> bool:

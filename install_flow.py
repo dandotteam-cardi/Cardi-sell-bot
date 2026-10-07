@@ -141,7 +141,7 @@ async def v_inbounds(raw: str, ctx: Ctx) -> Result:
 
 async def v_nonempty(raw: str, ctx: Ctx) -> Result:
     value = raw.strip()
-    if not value or len(value) > 256:
+    if not value or len(value) > 256 or any(ord(c) < 32 for c in value):
         return Result(error="مقدار نامعتبر است.")
     return Result(value=value)
 
@@ -276,6 +276,7 @@ def position(data: dict, key: str) -> tuple[int, int]:
 
 # ------------------------------------------------------------ .env
 def _quote(value: str) -> str:
+    value = "".join(" " if ord(c) < 32 else c for c in str(value))  # جلوگیری از تزریق خط جدید در .env
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
