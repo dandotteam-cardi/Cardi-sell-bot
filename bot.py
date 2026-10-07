@@ -25,6 +25,7 @@ from telegram.ext import (
 )
 
 import admin
+import autoinstall
 import config
 import install_flow as flow
 import provisioner
@@ -586,9 +587,12 @@ async def install_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if not await db.finish_install_info(sid):
             return
         context.user_data.pop("state", None)
+        auto = provisioner.enabled()
         await respond(update, "✅ <b>اطلاعات ربات شما ثبت شد.</b>\n\n"
-                              "ربات شما در صف نصب قرار گرفت و پس از راه‌اندازی به شما اطلاع داده می‌شود. "
-                              "وضعیت را از «🤖 ربات‌های من» ببینید.")
+                              + ("ربات شما در حال نصب خودکار است و پس از راه‌اندازی به شما اطلاع داده می‌شود. "
+                                 if auto else
+                                 "ربات شما در صف نصب قرار گرفت و پس از راه‌اندازی به شما اطلاع داده می‌شود. ")
+                              + "وضعیت را از «🤖 ربات‌های من» ببینید.")
         service = await db.get_service(sid)
         await notify_admins(
             context,
@@ -597,6 +601,8 @@ async def install_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             f"📦 {esc(service['plan_name'])} تا {fmt_date(service['end_at'])}",
             Markup([[Btn("📄 باز کردن سفارش", callback_data=f"adm:bot:{sid}")]]),
         )
+        if auto:
+            context.application.create_task(autoinstall.run(context.bot, db, sid))
 
 
 # ========================================================================= text
@@ -659,11 +665,11 @@ async def expiry_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             pass
         note = f"⛔️ سرویس #{s['id']} (@{esc(s['bot_username'] or '-')}) منقضی شد."
         if provisioner.enabled():
-            ok, out = await provisioner.stop(s["id"])
+            ok, out = await provisioner.remove(s["id"])
             if ok:
-                note += "\n⏹ ربات مشتری روی سرور متوقف شد."
+                note += "\n🗑 ربات مشتری متوقف و از سرور حذف شد."
             elif "not-installed" not in out:
-                note += "\n⚠️ توقف ربات روی سرور ناموفق بود؛ دستی بررسی کنید."
+                note += "\n⚠️ حذف ربات روی سرور ناموفق بود؛ دستی بررسی کنید."
         await notify_admins(context, note)
     for s in await db.due_soon(config.EXPIRY_REMINDER_DAYS):
         try:

@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# sellbot-provision — اسکریپت کمکی که ربات فروش با sudo اجرا می‌کند.
+# Usage: sellbot-provision {install|start|stop|remove} <user_id>-<service_id>
+#   install : ورودی استاندارد = متن .env ربات مشتری
+# پوشه:  $BASE_DIR/<slug>    سرویس: sellbot-c<slug>    کاربر سیستمی: sbc<slug>
+set -Eeuo pipefail
+umask 022
+export GIT_TERMINAL_PROMPT=0
+
+CONF=/etc/sellbot-provision.conf
+
+die() { echo "ERROR: $*"; exit 1; }
+trap 'echo "ERROR on line $LINENO"' ERR
+
+# توکن داخل URL ریپو هرگز در خروجی (که به تلگرام ادمین می‌رود) نمایش داده نمی‌شود
+redact() { sed -u -E 's#(://)[^/@[:space:]]+@#\1***@#g'; }
+strip_creds() { printf '%s' "$1" | sed -E 's#(://)[^/@]+@#\1#'; }
+
+main() {
+  [[ $EUID -eq 0 ]] || die "must run as root"
+  local action="${1:-}" slug="${2:-}"
+  [[ "$action" =~ ^(install|start|stop|remove)$ ]] || die "usage: $0 {install|start|stop|remove} <user_id>-<service_id>"
+  [[ "$slug" =~ ^[0-9]{1,20}-[0-9]{1,12}$ ]] || die "bad-slug"
+  [[ -r "$CONF" ]] || die "$CONF not found"
+  # shellcheck disable=SC1090
+  . "$CONF"
+  [[ "${BASE_DIR:-}" == /* ]] || die "invalid BASE_DIR"
+
+  local DIR="$BASE_DIR/$slug"
+  local UNIT="sellbot-c${slug}"
+  local UNIT_FILE="/etc/systemd/system/${UNIT}.service"
+  local SVC_USER="sbc${slug}"
+
+  exec 9>"/run/lock/sellbot-provision-${slug}.lock"
+  flock -n 9 || die "another operation is running for $slug"
+
+  case "$action" in
+    install) do_install ;;
+    start|stop)
+      [[ -f "$UNIT_FILE" ]] || { echo "not-installed"; exit 1; }
+      systemctl "$action" "$UNIT"
+      echo "OK: $action $slug" ;;
+    remove) do_remove ;;
+  esac
+}
+
+do_install() {
+  [[ -n "${REPO_URL:-}" ]] || die "REPO_URL is not set in $CONF"
+  local BRANCH="${BRANCH:-main}" ENTRY="${ENTRY:-bot.py}" PY="${PYTHON_BIN:-}"
+  [[ "$ENTRY" =~ ^[A-Za-z0-9_./-]+$ && "$ENTRY" != /* && "$ENTRY" != *..* ]] || die "invalid ENTRY"
+  [[ -x "$PY" ]] || PY="$(command -v python3)" || die "python3 not found"
+
+  local env_tmp; env_tmp="$(mktemp)"
+  cat > "$env_tmp"
+  [[ -s "$env_tmp" ]] || { rm -f "$env_tmp"; die "empty .env input"; }
+
+  mkdir -p "$BASE_DIR"
+  systemctl stop "$UNIT" 2>/dev/null || true
+
+  echo "[1/5] Fetching bot source..."
+  if [[ -d "$DIR/.git" ]]; then
+    git -c safe.directory="$DIR" -C "$DIR" fetch -q --depth 1 "$REPO_URL" "$BRANCH"
+    git -c safe.directory="$DIR" -C "$DIR" reset -q --hard FETCH_HEAD
+  else
+    rm -rf -- "$DIR"
+    git clone -q --depth 1 --branch "$BRANCH" "$REPO_URL" "$DIR"
+  fi
+  # حذف توکن گیت‌هاب از تنظیمات ریپو (کاربر ربات مشتری فایل‌ها را می‌خواند)
+  git -c safe.directory="$DIR" -C "$DIR" remote set-url origin "$(strip_creds "$REPO_URL")"
+
+  [[ -f "$DIR/requirements.txt" ]] || die "requirements.txt not found in customer repo"
+  [[ -f "$DIR/$ENTRY" ]] || die "entry file '$ENTRY' not found in customer repo"
+
+  echo "[2/5] Creating virtualenv and installing dependencies..."
+  [[ -x "$DIR/venv/bin/python" ]] || "$PY" -m venv "$DIR/venv"
+  "$DIR/venv/bin/pip" install -q --upgrade pip
+  "$DIR/venv/bin/pip" install -q -r "$DIR/requirements.txt"
+
+  echo "[3/5] Creating system user and writing .env..."
+  if ! id -u "$SVC_USER" >/dev/null 2>&1; then
+    useradd --system --home-dir "$DIR" --no-create-home \
+            --shell "$(command -v nologin || echo /usr/sbin/nologin)" "$SVC_USER"
+  fi
+  local grp; grp="$(id -gn "$SVC_USER")"
+  install -m 0600 -o "$SVC_USER" -g "$grp" "$env_tmp" "$DIR/.env"
+  rm -f "$env_tmp"
+  chown -R "$SVC_USER:$grp" "$DIR"
+  chmod 750 "$DIR"
+
+  echo "[4/5] Creating systemd service..."
+  cat > "$UNIT_FILE" <<UNITEOF
+[Unit]
+Description=Customer bot ${slug}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${SVC_USER}
+WorkingDirectory=${DIR}
+ExecStart=${DIR}/venv/bin/python ${ENTRY}
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+  systemctl daemon-reload
+  systemctl enable "$UNIT" >/dev/null 2>&1
+  systemctl restart "$UNIT"
+
+  echo "[5/5] Verifying service..."
+  sleep 6
+  if systemctl is-active --quiet "$UNIT"; then
+    echo "OK: installed $slug"
+  else
+    systemctl stop "$UNIT" 2>/dev/null || true   # جلوگیری از حلقه‌ی کرش؛ پوشه برای تلاش مجدد می‌ماند
+    echo "Service failed to start. Last logs:"
+    journalctl -u "$UNIT" -n 20 --no-pager 2>&1 || true
+    exit 1
+  fi
+}
+
+do_remove() {
+  if [[ ! -f "$UNIT_FILE" && ! -d "$DIR" ]] && ! id -u "$SVC_USER" >/dev/null 2>&1; then
+    echo "not-installed"; exit 1
+  fi
+  systemctl disable --now "$UNIT" 2>/dev/null || true
+  rm -f "$UNIT_FILE"
+  systemctl daemon-reload
+  systemctl reset-failed "$UNIT" 2>/dev/null || true
+  case "$DIR" in
+    "$BASE_DIR"/[0-9]*-[0-9]*) rm -rf -- "$DIR" ;;
+    *) die "refusing to delete unexpected path: $DIR" ;;
+  esac
+  if id -u "$SVC_USER" >/dev/null 2>&1; then userdel "$SVC_USER" 2>/dev/null || true; fi
+  echo "OK: removed $slug"
+}
+
+rc=0
+main "$@" 2>&1 | redact || rc="${PIPESTATUS[0]}"
+exit "$rc"

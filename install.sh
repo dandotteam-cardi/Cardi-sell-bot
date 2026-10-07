@@ -11,6 +11,13 @@ SERVICE_NAME="${SERVICE_NAME:-seller-bot}"
 BOT_USER="${BOT_USER:-sellerbot}"
 CLI_NAME="${CLI_NAME:-sellerbot}"
 ENV_FILE="$INSTALL_DIR/.env"
+CUSTOMERS_DIR="$INSTALL_DIR/customers"
+PROV_HELPER="/usr/local/sbin/sellbot-provision"
+PROV_CONF="/etc/sellbot-provision.conf"
+PROV_SUDOERS="/etc/sudoers.d/sellbot-provision"
+CUSTOMER_REPO_URL="${CUSTOMER_REPO_URL:-}"
+CUSTOMER_BRANCH="${CUSTOMER_BRANCH:-main}"
+CUSTOMER_ENTRY="${CUSTOMER_ENTRY:-bot.py}"
 
 if [[ -t 1 ]]; then
   R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; B=$'\033[36m'; N=$'\033[0m'
@@ -89,11 +96,11 @@ install_packages() {
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y -qq
-    apt-get install -y -qq git curl ca-certificates python3 python3-venv python3-pip
+    apt-get install -y -qq git curl ca-certificates sudo python3 python3-venv python3-pip
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y -q git curl ca-certificates python3 python3-pip
+    dnf install -y -q git curl ca-certificates sudo python3 python3-pip
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y -q git curl ca-certificates python3 python3-pip
+    yum install -y -q git curl ca-certificates sudo python3 python3-pip
   else
     die "Unsupported package manager (apt / dnf / yum). Please install prerequisites manually."
   fi
@@ -203,6 +210,56 @@ configure_advanced() {
   put EXPIRY_REMINDER_DAYS "$REM"
 }
 
+configure_provision() {
+  printf '\n%s━━━━━━━━ Customer Bot Auto-Install ━━━━━━━━%s\n' "$B" "$N"
+  local d_repo="$CUSTOMER_REPO_URL" d_br="$CUSTOMER_BRANCH" d_ent="$CUSTOMER_ENTRY"
+  if [[ -r "$PROV_CONF" ]]; then
+    [[ -n "$d_repo" ]] || d_repo="$(. "$PROV_CONF" 2>/dev/null; printf '%s' "${REPO_URL:-}")"
+    d_br="$(. "$PROV_CONF" 2>/dev/null; printf '%s' "${BRANCH:-$d_br}")"
+    d_ent="$(. "$PROV_CONF" 2>/dev/null; printf '%s' "${ENTRY:-$d_ent}")"
+  fi
+  ask CUSTOMER_REPO_URL "GitHub repo URL of the customer bot (private: https://TOKEN@github.com/user/repo.git)" "$d_repo" 1
+  ask CUSTOMER_BRANCH "Customer bot branch" "$d_br" 1
+  ask CUSTOMER_ENTRY "Customer bot entry file" "$d_ent" 1
+  [[ "$CUSTOMER_ENTRY" =~ ^[A-Za-z0-9_./-]+$ && "$CUSTOMER_ENTRY" != /* && "$CUSTOMER_ENTRY" != *..* ]] \
+    || die "Invalid entry file name."
+
+  umask 077
+  {
+    printf 'REPO_URL=%q\n' "$CUSTOMER_REPO_URL"
+    printf 'BRANCH=%q\n' "$CUSTOMER_BRANCH"
+    printf 'ENTRY=%q\n' "$CUSTOMER_ENTRY"
+    printf 'BASE_DIR=%q\n' "$CUSTOMERS_DIR"
+    printf 'PYTHON_BIN=%q\n' "$PYTHON_BIN"
+  } > "$PROV_CONF"
+  chown root:root "$PROV_CONF"
+  chmod 600 "$PROV_CONF"
+
+  if grep -q '^PROVISION_ENABLED=' "$ENV_FILE"; then
+    sed -i "s/^PROVISION_ENABLED=.*/PROVISION_ENABLED='1'/" "$ENV_FILE"
+  else
+    printf "PROVISION_ENABLED='1'\n" >> "$ENV_FILE"
+  fi
+  chmod 600 "$ENV_FILE"
+  ok "Customer bot auto-install configured."
+}
+
+install_provisioner() {
+  [[ -f "$INSTALL_DIR/sellbot-provision" ]] || die "sellbot-provision not found in the repository. Push it to GitHub first."
+  install -m 0755 -o root -g root "$INSTALL_DIR/sellbot-provision" "$PROV_HELPER"
+  mkdir -p "$CUSTOMERS_DIR"
+  chown root:root "$CUSTOMERS_DIR"
+  chmod 755 "$CUSTOMERS_DIR"
+  local tmp
+  tmp="$(mktemp)"
+  printf '%s ALL=(root) NOPASSWD: %s\n' "$BOT_USER" "$PROV_HELPER" > "$tmp"
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -cf "$tmp" >/dev/null || { rm -f "$tmp"; die "Generated sudoers entry is invalid."; }
+  fi
+  install -m 0440 -o root -g root "$tmp" "$PROV_SUDOERS"
+  rm -f "$tmp"
+}
+
 setup_venv() {
   info "Creating Python virtual environment and installing dependencies (this may take a few minutes)..."
   if [[ ! -x "$INSTALL_DIR/venv/bin/python" ]]; then
@@ -227,12 +284,11 @@ WorkingDirectory=${INSTALL_DIR}
 ExecStart=${INSTALL_DIR}/venv/bin/python bot.py
 Restart=always
 RestartSec=5
-NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  chown -R "$BOT_USER":"$BOT_USER" "$INSTALL_DIR"
+  find "$INSTALL_DIR" -path "$CUSTOMERS_DIR" -prune -o -exec chown "$BOT_USER":"$BOT_USER" {} +
   systemctl daemon-reload
   systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
   systemctl restart "$SERVICE_NAME"
@@ -252,13 +308,20 @@ case "\${1:-help}" in
     git -c safe.directory="\$DIR" -C "\$DIR" fetch --depth 1 origin "\$BR"
     git -c safe.directory="\$DIR" -C "\$DIR" reset --hard "origin/\$BR"
     "\$DIR/venv/bin/pip" install -q -r "\$DIR/requirements.txt"
-    chown -R "\$BU":"\$BU" "\$DIR"
+    [[ -f "\$DIR/sellbot-provision" ]] && install -m 0755 -o root -g root "\$DIR/sellbot-provision" /usr/local/sbin/sellbot-provision
+    find "\$DIR" -path "\$DIR/customers" -prune -o -exec chown "\$BU":"\$BU" {} +
     systemctl restart "\$SVC" && echo "Update completed." ;;
   uninstall)
     read -r -p "Remove bot and service? [y/N] " a
     [[ "\$a" =~ ^[Yy] ]] || exit 0
     systemctl disable --now "\$SVC" 2>/dev/null || true
-    rm -f "/etc/systemd/system/\$SVC.service" "/usr/local/bin/\$ME"; systemctl daemon-reload
+    for f in /etc/systemd/system/sellbot-c*.service; do
+      [[ -e "\$f" ]] || continue
+      u="\$(basename "\$f" .service)"; systemctl disable --now "\$u" 2>/dev/null || true; rm -f "\$f"
+      userdel "sbc\${u#sellbot-c}" 2>/dev/null || true
+    done
+    rm -f "/etc/systemd/system/\$SVC.service" "/usr/local/bin/\$ME" /usr/local/sbin/sellbot-provision /etc/sudoers.d/sellbot-provision /etc/sellbot-provision.conf
+    systemctl daemon-reload
     read -r -p "Also delete \$DIR (including .env and database)? [y/N] " b
     if [[ "\$b" =~ ^[Yy] ]]; then rm -rf "\$DIR"; fi
     echo "Removed." ;;
@@ -290,6 +353,7 @@ Management commands:
   ${CLI_NAME} uninstall   Uninstall
 
 Install path: ${INSTALL_DIR}
+Customer bots are installed automatically in: ${CUSTOMERS_DIR}/<order-id>
 Next: send /start to the bot in Telegram, then /admin to add services, card number and support username.
 EOF
 }
@@ -302,7 +366,9 @@ main() {
   ensure_user
   fetch_code
   configure_env
+  configure_provision
   setup_venv
+  install_provisioner
   install_service
   install_cli
   finish

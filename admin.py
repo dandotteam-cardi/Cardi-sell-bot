@@ -9,8 +9,10 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
+import autoinstall
 import config
 import install_flow as flow
+import provisioner
 from utils import days_left, esc, fmt_date, money, norm_digits, status_label
 
 SETTING_LABELS = {
@@ -139,6 +141,8 @@ async def _bot_view(update, context, sid: int) -> None:
     rows = []
     if s["status"] in ("pending_install", "installing", "active", "expired"):
         rows.append([Btn("📄 فایل .env", callback_data=f"adm:env:{sid}")])
+    if provisioner.enabled() and s["status"] in ("pending_install", "installing"):
+        rows.append([Btn("🚀 نصب خودکار", callback_data=f"adm:botact:auto:{sid}")])
     if s["status"] in ("pending_install", "expired"):
         rows.append([Btn("⚙️ در حال نصب", callback_data=f"adm:botact:installing:{sid}")])
     if s["status"] in ("pending_install", "installing", "expired"):
@@ -213,6 +217,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _bot_view(update, context, int(args[0]))
     elif action == "botact":
         status, sid = args[0], int(args[1])
+        if status == "auto":
+            if provisioner.enabled():
+                context.application.create_task(autoinstall.run(context.bot, db, sid))
+                await _bot_view(update, context, sid)
+            return
         if status in ("installing", "active"):
             service = await db.get_service(sid)
             if service is None:
@@ -327,8 +336,11 @@ async def handle_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
         if not days or days > 3650:
             await msg.reply_text("❗️ یک عدد معتبر برای روز بفرستید.")
             return True
+        before = await db.get_service(state["sid"])
         await db.extend_service(state["sid"], days)
         ud.pop("state", None)
+        if before is not None and before["status"] == "expired" and provisioner.enabled():
+            context.application.create_task(autoinstall.run(context.bot, db, state["sid"]))
         await msg.reply_text(f"✅ {days} روز تمدید شد.", reply_markup=Markup([[Btn("🤖 سفارش", callback_data=f"adm:bot:{state['sid']}")]]))
     return True
 
