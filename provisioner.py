@@ -49,12 +49,17 @@ async def _run(action: str, slug: str, stdin_text: str | None = None,
     except Exception as exc:  # noqa: BLE001
         return False, f"error: {exc}"
     text = out.decode("utf-8", "replace").strip()
-    return proc.returncode == 0, text[-1500:]
+    return proc.returncode == 0, text[-3500:]
 
 
 async def install(slug: str, env_text: str) -> tuple[bool, str]:
     """ساخت پوشه‌ی مشتری، کلون ریپوی ربات، venv، نوشتن .env و راه‌اندازی سرویس systemd."""
     return await _run("install", slug, stdin_text=env_text, timeout=INSTALL_TIMEOUT)
+
+
+async def update_env(slug: str, env_text: str) -> tuple[bool, str]:
+    """جایگزینی .env ربات مشتری؛ اگر سرویس در حال اجرا باشد ریستارت می‌شود."""
+    return await _run("update-env", slug, stdin_text=env_text)
 
 
 async def start(slug: str) -> tuple[bool, str]:
@@ -63,6 +68,19 @@ async def start(slug: str) -> tuple[bool, str]:
 
 async def stop(slug: str) -> tuple[bool, str]:
     return await _run("stop", slug)
+
+
+async def restart(slug: str) -> tuple[bool, str]:
+    return await _run("restart", slug)
+
+
+async def status(slug: str) -> tuple[bool, str]:
+    """خروجی متن: active | inactive | failed | missing"""
+    return await _run("status", slug)
+
+
+async def logs(slug: str) -> tuple[bool, str]:
+    return await _run("logs", slug)
 
 
 async def remove(slug: str) -> tuple[bool, str]:

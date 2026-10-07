@@ -3,8 +3,8 @@
 # Usage:  bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/install.sh)
 set -Eeuo pipefail
 
-# ⚠️ قبل از انتشار آدرس مخزن خودتان را اینجا بگذارید (یا موقع اجرا REPO_URL را بدهید)
-REPO_URL="${REPO_URL:-https://github.com/YOUR_USER/YOUR_REPO.git}"
+
+REPO_URL="${REPO_URL:- https://raw.githubusercontent.com/dandotteam-cardi/Cardi-sell-bot/main/install.sh}"
 BRANCH="${BRANCH:-main}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/seller-bot}"
 SERVICE_NAME="${SERVICE_NAME:-seller-bot}"

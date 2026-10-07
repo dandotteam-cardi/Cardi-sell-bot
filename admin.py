@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import io
 import json
+import time
 
 from telegram import InlineKeyboardButton as Btn, InlineKeyboardMarkup as Markup, Update
 from telegram.constants import ParseMode
@@ -29,6 +30,9 @@ HOME = Markup([
     [Btn("📊 آمار", callback_data="adm:stats")],
 ])
 BACK = Markup([[Btn("🔙 پنل مدیریت", callback_data="adm:home")]])
+
+INSTALLED = ("active", "stopped")  # سرویس‌هایی که روی دیسک نصب شده‌اند
+SECRET_KEYS = ("bot_token", "panel_password", "panel_api_token")
 
 
 def db_of(context):
@@ -118,28 +122,35 @@ async def _user_view(update, context, user: dict) -> None:
 
 
 async def _bots_view(update, context) -> None:
-    services = await db_of(context).recent_services(25)
+    services = [s for s in await db_of(context).recent_services(40) if s["status"] != "removed"]
     if not services:
         await _show(update, "🤖 هنوز سفارشی ثبت نشده است.", BACK)
         return
     rows = [[Btn(f"#{s['id']} {s['bot_name'] or s['plan_name']} · {status_label(s)}", callback_data=f"adm:bot:{s['id']}")]
             for s in services]
     rows.append([Btn("🔙 پنل مدیریت", callback_data="adm:home")])
-    await _show(update, "🤖 <b>ربات‌های مشتریان</b> (۲۵ سفارش آخر)", Markup(rows))
+    await _show(update, "🤖 <b>ربات‌های مشتریان</b> (۴۰ سفارش آخر)", Markup(rows))
 
 
-async def _bot_view(update, context, sid: int) -> None:
+async def _bot_view(update, context, sid: int, note: str = "") -> None:
     s = await db_of(context).get_service(sid)
-    if s is None:
+    if s is None or s["status"] == "removed":
         await _bots_view(update, context)
         return
+    live = ""
+    if provisioner.enabled() and s["status"] in INSTALLED:
+        ok, out = await provisioner.status(provisioner.slug_for(s))
+        state = out.strip().splitlines()[-1] if out.strip() else "?"
+        live = "\n🖥 روی سرور: " + ("🟢 در حال اجرا" if ok and state == "active" else f"🔴 {esc(state)}")
     text = (f"🤖 <b>سفارش #{sid}</b>\n\n👤 مشتری: <code>{s['user_id']}</code>\n"
             f"🔖 ربات: @{esc(s['bot_username'] or '—')}\n🏷 نام: {esc(s['bot_name'] or '—')}\n"
             f"📦 {esc(s['plan_name'])} · {money(s['price'])} تومان\n"
             f"📅 {fmt_date(s['start_at'])} تا {fmt_date(s['end_at'])} ({days_left(s)} روز مانده)\n"
-            f"📍 {status_label(s)}")
+            f"📍 {status_label(s)}{live}")
+    if note:
+        text += f"\n\n{note}"
     rows = []
-    if s["status"] in ("pending_install", "installing", "active", "expired"):
+    if s["status"] in ("pending_install", "installing", "active", "expired", "stopped"):
         rows.append([Btn("📄 فایل .env", callback_data=f"adm:env:{sid}")])
     if provisioner.enabled() and s["status"] in ("pending_install", "installing"):
         rows.append([Btn("🚀 نصب خودکار", callback_data=f"adm:botact:auto:{sid}")])
@@ -147,9 +158,161 @@ async def _bot_view(update, context, sid: int) -> None:
         rows.append([Btn("⚙️ در حال نصب", callback_data=f"adm:botact:installing:{sid}")])
     if s["status"] in ("pending_install", "installing", "expired"):
         rows.append([Btn("✅ نصب شد (فعال)", callback_data=f"adm:botact:active:{sid}")])
+    if s["status"] != "awaiting_info":
+        rows.append([Btn("✏️ ویرایش اطلاعات", callback_data=f"adm:botedit:{sid}")])
+    if provisioner.enabled() and s["status"] in INSTALLED:
+        toggle = (Btn("▶️ شروع", callback_data=f"adm:botstart:{sid}") if s["status"] == "stopped"
+                  else Btn("⏸ توقف", callback_data=f"adm:botstop:{sid}"))
+        rows.append([toggle, Btn("🔄 ریستارت", callback_data=f"adm:botrs:{sid}"),
+                     Btn("📜 لاگ", callback_data=f"adm:botlogs:{sid}")])
+    if provisioner.enabled() and s["status"] != "awaiting_info":
+        rows.append([Btn("🗑 حذف کامل", callback_data=f"adm:botdel:{sid}")])
     rows.append([Btn("➕ تمدید", callback_data=f"adm:extend:{sid}")])
     rows.append([Btn("🔙 لیست", callback_data="adm:bots")])
     await _show(update, text, Markup(rows))
+
+
+# ------------------------------------------------------- ویرایش / مدیریت ربات فروخته‌شده
+def _idata(s: dict) -> dict:
+    try:
+        return json.loads(s["install_data"] or "{}")
+    except ValueError:
+        return {}
+
+
+def _show_value(step, data: dict) -> str:
+    v = str(data.get(step.key, "") or "")
+    if not v:
+        return "—"
+    if step.secret:
+        return "••••"
+    return v if len(v) <= 28 else v[:25] + "…"
+
+
+async def _edit_fields_view(update, context, sid: int, note: str = "") -> None:
+    s = await db_of(context).get_service(sid)
+    if s is None or s["status"] in ("removed", "awaiting_info"):
+        await _bots_view(update, context)
+        return
+    data = _idata(s)
+    missing = set(flow.missing_required(data))
+    rows = [[Btn(f"{'⚠️ ' if st.key in missing else ''}{st.title}: {_show_value(st, data)}",
+                 callback_data=f"adm:botef:{sid}:{st.key}")] for st in flow.applicable(data)]
+    rows.append([Btn("🔙 بازگشت", callback_data=f"adm:bot:{sid}")])
+    text = (f"✏️ <b>ویرایش سفارش #{sid}</b> (@{esc(s['bot_username'] or '—')})\n\n"
+            "فیلد موردنظر را انتخاب کنید. بعد از ذخیره، .env روی سرور بازنویسی و ربات ریستارت می‌شود.")
+    if note:
+        text = f"{note}\n\n{text}"
+    await _show(update, text, Markup(rows))
+
+
+async def _ask_field(update, context, sid: int, key: str) -> None:
+    s = await db_of(context).get_service(sid)
+    step = flow.get_step(key)
+    if s is None or step is None:
+        await _bots_view(update, context)
+        return
+    if s["status"] == "installing":
+        await _bot_view(update, context, sid, "⏳ سفارش در حال نصب است؛ کمی بعد تلاش کنید.")
+        return
+    data = _idata(s)
+    cur = "—" if not data.get(key) else ("••••" if step.secret else esc(str(data[key])))
+    text = f"{step.prompt}\n\nمقدار فعلی: <code>{cur}</code>"
+    rows = []
+    if step.kind == "choice":
+        context.user_data.pop("state", None)
+        rows.append([Btn(label, callback_data=f"adm:botec:{sid}:{key}:{i}") for i, (label, _) in enumerate(step.choices)])
+    else:
+        context.user_data["state"] = {"name": "adm_bot_edit", "sid": sid, "key": key}
+        text += "\n\n✍️ مقدار جدید را ارسال کنید."
+    if step.optional and data.get(key):
+        rows.append([Btn("🧹 پاک کردن مقدار", callback_data=f"adm:botclr:{sid}:{key}")])
+    rows.append([Btn("❌ انصراف", callback_data=f"adm:botedit:{sid}")])
+    await _show(update, text, Markup(rows))
+
+
+async def _apply_edit(context, sid: int, key: str, value: str, extra: dict | None = None) -> tuple[bool, str]:
+    db = db_of(context)
+    s = await db.get_service(sid)
+    if s is None:
+        return False, "❌ سفارش پیدا نشد."
+    data = _idata(s)
+    if extra:
+        data.update(extra)
+    if value:
+        data[key] = value
+    else:
+        data.pop(key, None)
+    if not await db.update_install(sid, s["install_step"], data):
+        return False, "❌ این توکن قبلاً برای سرویس دیگری ثبت شده است."
+    missing = flow.missing_required(data)
+    if missing:
+        titles = ", ".join(esc(flow.get_step(k).title) for k in missing if flow.get_step(k))
+        return True, f"✅ ذخیره شد، اما فیلدهای ضروری ناقص است: {titles}\nتا تکمیل آن‌ها روی سرور اعمال نمی‌شود."
+    if s["status"] in INSTALLED and provisioner.enabled():
+        env_text = flow.render_env(flow.build_env(data))
+        ok, out = await provisioner.update_env(provisioner.slug_for(s), env_text)
+        if not ok:
+            return False, f"⚠️ ذخیره شد ولی اعمال روی سرور ناموفق بود:\n<pre>{esc(out[-800:])}</pre>"
+        how = "ریستارت شد" if "restarted" in out else "بدون ریستارت، سرویس متوقف است"
+        return True, f"✅ ذخیره و روی سرور اعمال شد ({how})."
+    return True, "✅ ذخیره شد."
+
+
+async def _bot_manage(update, context, act: str, sid: int) -> None:
+    """توقف / شروع / ریستارت / لاگ / حذف کامل ربات روی سرور."""
+    db = db_of(context)
+    s = await db.get_service(sid)
+    if s is None or s["status"] == "removed":
+        await _bots_view(update, context)
+        return
+    if not provisioner.enabled():
+        await _bot_view(update, context, sid, "❌ نصب خودکار فعال نیست (PROVISION_ENABLED).")
+        return
+    if s["status"] == "installing":
+        await _bot_view(update, context, sid, "⏳ سفارش در حال نصب است؛ کمی بعد تلاش کنید.")
+        return
+    slug = provisioner.slug_for(s)
+
+    if act == "botstop":
+        ok, out = await provisioner.stop(slug)
+        if ok:
+            await db.set_service_status(sid, "stopped")
+        await _bot_view(update, context, sid, "✅ ربات متوقف شد." if ok else f"❌ توقف ناموفق:\n<pre>{esc(out[-800:])}</pre>")
+    elif act == "botstart":
+        if s["end_at"] <= int(time.time()):
+            await _bot_view(update, context, sid, "❌ سرویس منقضی شده است؛ ابتدا تمدید کنید.")
+            return
+        ok, out = await provisioner.start(slug)
+        if ok:
+            await db.set_service_status(sid, "active")
+        await _bot_view(update, context, sid, "✅ ربات اجرا شد." if ok else f"❌ اجرا ناموفق:\n<pre>{esc(out[-800:])}</pre>")
+    elif act == "botrs":
+        ok, out = await provisioner.restart(slug)
+        await _bot_view(update, context, sid, "✅ ریستارت شد." if ok else f"❌ ریستارت ناموفق:\n<pre>{esc(out[-800:])}</pre>")
+    elif act == "botlogs":
+        ok, out = await provisioner.logs(slug)
+        await update.effective_chat.send_message(
+            f"📜 <b>لاگ سفارش #{sid}</b>\n<pre>{esc(out[-3500:] or '-')}</pre>", parse_mode=ParseMode.HTML)
+    elif act == "botdel":
+        await _show(update, (
+            f"🗑 <b>حذف کامل سفارش #{sid}</b> (@{esc(s['bot_username'] or '—')})\n\n"
+            "سرویس متوقف و پوشه، دیتابیس و کاربر سیستمی این ربات برای همیشه از روی سرور پاک می‌شود.\n"
+            "این کار قابل بازگشت نیست. مطمئنید؟"), Markup([
+                [Btn("✅ بله، حذف شود", callback_data=f"adm:botdelok:{sid}")],
+                [Btn("❌ انصراف", callback_data=f"adm:bot:{sid}")]]))
+    elif act == "botdelok":
+        ok, out = await provisioner.remove(slug)
+        if not ok:
+            await _bot_view(update, context, sid, f"❌ حذف ناموفق:\n<pre>{esc(out[-800:])}</pre>")
+            return
+        data = _idata(s)
+        for k in SECRET_KEYS:
+            data.pop(k, None)
+        await db.update_install(sid, None, data)  # آزاد شدن توکن و پاک‌شدن رمزها از دیتابیس
+        await db.set_service_status(sid, "removed")
+        await _show(update, f"✅ ربات سفارش #{sid} به‌طور کامل حذف شد.",
+                    Markup([[Btn("🔙 لیست", callback_data="adm:bots")]]))
 
 
 async def _stats_view(update, context) -> None:
@@ -237,6 +400,31 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 except TelegramError:
                     pass
             await _bot_view(update, context, sid)
+    elif action in ("botstop", "botstart", "botrs", "botlogs", "botdel", "botdelok"):
+        ud.pop("state", None)
+        await _bot_manage(update, context, action, int(args[0]))
+    elif action == "botedit":
+        ud.pop("state", None)
+        await _edit_fields_view(update, context, int(args[0]))
+    elif action == "botef":
+        await _ask_field(update, context, int(args[0]), args[1])
+    elif action in ("botec", "botclr"):
+        sid, key = int(args[0]), args[1]
+        step = flow.get_step(key)
+        value = None
+        if step is not None:
+            if action == "botclr" and step.optional:
+                value = ""
+            elif action == "botec":
+                try:
+                    value = step.choices[int(args[2])][1]
+                except (IndexError, ValueError):
+                    value = None
+        if value is None:
+            await _edit_fields_view(update, context, sid, "❌ مقدار نامعتبر.")
+        else:
+            _, note = await _apply_edit(context, sid, key, value)
+            await _edit_fields_view(update, context, sid, note)
     elif action == "env":
         service = await db.get_service(int(args[0]))
         if service is None:
@@ -342,6 +530,38 @@ async def handle_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
         if before is not None and before["status"] == "expired" and provisioner.enabled():
             context.application.create_task(autoinstall.run(context.bot, db, state["sid"]))
         await msg.reply_text(f"✅ {days} روز تمدید شد.", reply_markup=Markup([[Btn("🤖 سفارش", callback_data=f"adm:bot:{state['sid']}")]]))
+    elif name == "adm_bot_edit":
+        sid, step = state["sid"], flow.get_step(state["key"])
+        s = await db.get_service(sid)
+        if s is None or step is None or s["status"] == "removed":
+            ud.pop("state", None)
+            await msg.reply_text("❌ سفارش یا فیلد پیدا نشد.", reply_markup=BACK)
+            return True
+        if step.secret:
+            try:
+                await msg.delete()
+            except TelegramError:
+                pass
+
+        async def in_use(token: str) -> bool:
+            return await db.token_in_use(token, sid)
+
+        ctx = flow.Ctx(data=dict(_idata(s)), main_token=config.BOT_TOKEN, token_in_use=in_use)
+        res = await step.validate(msg.text or "", ctx) if step.validate else flow.Result(value=text)
+        if res.error and not res.soft:
+            await update.effective_chat.send_message(
+                f"❌ {esc(res.error)}\nدوباره بفرستید یا انصراف بزنید.", parse_mode=ParseMode.HTML,
+                reply_markup=Markup([[Btn("❌ انصراف", callback_data=f"adm:botedit:{sid}")]]))
+            return True
+        ud.pop("state", None)
+        extra = {k: ctx.data[k] for k in ("bot_id", "bot_username") if k in ctx.data} if step.key == "bot_token" else {}
+        _, note = await _apply_edit(context, sid, step.key, res.value, extra)
+        if res.error:  # خطای نرم، مثلاً ادمین‌نبودن ربات در کانال
+            note += f"\n⚠️ {esc(res.error)}"
+        await update.effective_chat.send_message(
+            note, parse_mode=ParseMode.HTML,
+            reply_markup=Markup([[Btn("✏️ ادامه‌ی ویرایش", callback_data=f"adm:botedit:{sid}")],
+                                 [Btn("🤖 سفارش", callback_data=f"adm:bot:{sid}")]]))
     return True
 
 

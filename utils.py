@@ -19,6 +19,8 @@ STATUS_LABELS = {
     "installing": "⚙️ در حال نصب",
     "active": "✅ فعال",
     "expired": "⛔️ منقضی",
+    "stopped": "⏸ متوقف",
+    "removed": "🗑 حذف‌شده",
 }
 
 
